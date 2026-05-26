@@ -1,0 +1,6 @@
+*.hexlic
+*.py
+*.pem
+*.go
+!keygen.go
+!patch.py
