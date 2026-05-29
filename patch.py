@@ -68,37 +68,43 @@ def patch_library(file_path: Path, new_n_bytes: bytes, new_e_bytes: bytes) -> bo
     return True
 
 
+def get_lib_names() -> list[str]:
+    if sys.platform == "darwin":
+        return ["libida.dylib", "libida32.dylib"]
+    elif sys.platform == "win32":
+        return ["ida.dll", "ida32.dll"]
+    else:
+        return ["libida.so", "libida32.so"]
+
+
 def main():
     parser = argparse.ArgumentParser(description="ida pro 9.3 rsa pub key patcher")
     parser.add_argument("-n", "--new-n", required=True, help="new modulus n (hex string, le, 128 bytes/256 chars)")
     parser.add_argument("-e", "--new-e", default="01000100", help="new exponent e (hex string, le, 4 bytes, default 65537/01000100)")
-    parser.add_argument("-d", "--ida-dir", default=Path.home() / "meowida" / "IDA Professional 9.3.app" / "Contents" / "MacOS", type=Path, help="path to ida macos directory")
-    
+    parser.add_argument("-d", "--ida-dir", required=True, type=Path, help="path to ida directory (e.g. on macos: ~/meowida/IDA\\ Professional\\ 9.3.app/Contents/MacOS)")
+
     args = parser.parse_args()
-    
+
     new_n_hex = args.new_n.strip()
     if len(new_n_hex) != 256:
         logger.error(f"new N !!MUST BE!! exactly 256 hex char (128 bytes). goto {len(new_n_hex)}")
         sys.exit(1)
-        
+
     new_e_hex = args.new_e.strip()
     if len(new_e_hex) != 8:
         logger.error(f"new E !!MUST BE!! exactly 8 hex char (4 bytes). got {len(new_e_hex)}")
         sys.exit(1)
-        
+
     try:
         new_n_bytes = bytes.fromhex(new_n_hex)
         new_e_bytes = bytes.fromhex(new_e_hex)
     except ValueError as e:
         logger.error(f"invalid hex string provided: {e}")
         sys.exit(1)
-        
+
     ida_dir = args.ida_dir
-    
-    targets = [
-        ida_dir / "libida.dylib",
-        ida_dir / "libida32.dylib",
-    ]
+
+    targets = [ida_dir / name for name in get_lib_names()]
     
     success_count = 0
     for target in targets:

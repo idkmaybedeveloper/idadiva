@@ -4,3 +4,4 @@
 *.go
 !keygen.go
 !patch.py
+*.exe
