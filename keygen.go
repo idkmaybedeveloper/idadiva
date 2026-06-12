@@ -1,17 +1,31 @@
 package main
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
-	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"math/big"
 	"os"
 	"time"
+)
+
+const (
+	cModulusHex = "3f0307607fed562fd5a163adc40fcc603373caa28414e64cdc4552a555b13ad" +
+		"4b3ad0a812800a03195300fd71634b90edb0d69ea710efebb2b0b9e72da2effb1" +
+		"49de70bcbfa94b86af01ce455dbbd5fa987207651c7b60c2e4cafd0654188d98c" +
+		"30f64dc084d8547f0ac32db91124af82b3b15bf922a31f1d5e332f27615cea7"
+
+	privateKeyHex = "8b3f5fdfad7f87239734c530e2ecebeb4fa48d79518756c15fd54636801cf7e" +
+		"a6367100566bf8b52b16bec05258d8426ea94c15841ab2d37802c07349df4c208" +
+		"584e86d25a6bfb82966cb2ddcd3d654e9994e814ca470577362a937cc984e404a" +
+		"0b68d173aab3180130118e1b03ed209a9d8757560a85a3c9b0d3380e7907c4f"
+
+	padKeyHex = "e2a7c300dfcc777f89b57500d8151c7fb1d97b3f9f170393311234ceeb9e377a" +
+		"e2a7c300dfcc777f89b57500d8151c7fb1d97b3f9f170393311234ceeb9e377a" +
+		"e2a7c300dfcc777f89b57500d8151c7fb1d97b3f9f170393311234ceeb9e377a" +
+		"e2a7c300dfcc777f89b57500d8151c7fb1d97b3f9f170393311234ceeb9e37"
 )
 
 type AddOn struct {
@@ -23,18 +37,20 @@ type AddOn struct {
 }
 
 type License struct {
-	AddOns         []AddOn `json:"add_ons"`
-	Description    string  `json:"description"`
-	EditionID      string  `json:"edition_id"`
-	EndDate        string  `json:"end_date"`
-	ID             string  `json:"id"`
-	IssuedOn       string  `json:"issued_on"`
-	LicenseType    string  `json:"license_type"`
-	Owner          string  `json:"owner"`
-	ProductID      string  `json:"product_id"`
-	ProductVersion string  `json:"product_version"`
-	Seats          int     `json:"seats"`
-	StartDate      string  `json:"start_date"`
+	AddOns         []AddOn       `json:"add_ons"`
+	Description    string        `json:"description"`
+	EditionID      string        `json:"edition_id"`
+	EndDate        string        `json:"end_date"`
+	Features       []interface{} `json:"features"`
+	ID             string        `json:"id"`
+	IssuedOn       string        `json:"issued_on"`
+	LicenseType    string        `json:"license_type"`
+	Owner          string        `json:"owner"`
+	Product        string        `json:"product"`
+	ProductID      string        `json:"product_id"`
+	ProductVersion string        `json:"product_version"`
+	Seats          int           `json:"seats"`
+	StartDate      string        `json:"start_date"`
 }
 
 type Payload struct {
@@ -49,78 +65,52 @@ type Hexlic struct {
 	Signature string         `json:"signature"`
 }
 
-func loadOrGenerateKey() *rsa.PrivateKey {
-	keyFile := "private_key.pem"
-	if data, err := os.ReadFile(keyFile); err == nil {
-		block, _ := pem.Decode(data)
-		if block != nil && block.Type == "RSA PRIVATE KEY" {
-			privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-			if err == nil {
-				slog.Info("loaded existing key", "file", keyFile)
-				return privKey
-			}
-		}
+func leHexToBigInt(hexStr string) *big.Int {
+	b, _ := hex.DecodeString(hexStr)
+	for i, j := 0, len(b)-1; i < j; i, j = i+1, j-1 {
+		b[i], b[j] = b[j], b[i]
 	}
-
-	slog.Info("gen new rsa keypair...")
-	privKey, err := rsa.GenerateKey(rand.Reader, 1024)
-	if err != nil {
-		slog.Error("failed to generate key!", "error", err)
-		os.Exit(1)
-	}
-
-	keyBytes := x509.MarshalPKCS1PrivateKey(privKey)
-	pemBlock := &pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: keyBytes,
-	}
-	pemFile, err := os.Create(keyFile)
-	if err == nil {
-		pem.Encode(pemFile, pemBlock)
-		pemFile.Close()
-		slog.Info("saved new rsa key", "file", keyFile)
-	} else {
-		slog.Warn("whops, failed to save key to file", "error", err)
-	}
-
-	return privKey
+	return new(big.Int).SetBytes(b)
 }
 
 func main() {
-	privKey := loadOrGenerateKey()
+	n := leHexToBigInt(cModulusHex)
+	d := leHexToBigInt(privateKeyHex)
+	padKey, _ := hex.DecodeString(padKeyHex)
 
-	nBytes := privKey.N.Bytes()
-	if len(nBytes) < 128 {
-		pad := make([]byte, 128-len(nBytes))
-		nBytes = append(pad, nBytes...)
-	}
-
-	// n is stored in libida as le (at least in dylib)
-	leN := make([]byte, 128)
-	for i := 0; i < 128; i++ {
-		leN[i] = nBytes[127-i]
-	}
-
-	slog.Info("libida patch info",
-		"pub_key", fmt.Sprintf("%x", leN),
-		"pub_exp", privKey.E,
-	)
-
-	// payload
 	now := time.Now()
 	issueDate := now.Format("2006-01-02 15:04:05")
-	startDate := now.Format("2006-01-02")
-	endDate := now.AddDate(67 /*years*/, 0, 0).Format("2006-01-02")
+	startDate := now.Format("2006-01-02") + " 00:00:00"
+	endDate := now.AddDate(67, 0, 0).Format("2006-01-02") + " 00:00:00"
+
+	licID := "43-0000-FFFF-37"
+
+	addons := []string{
+		"LUMINA", "TEAMS", "HEXX86", "HEXX64", "HEXARM", "HEXARM64",
+		"HEXMIPS", "HEXMIPS64", "HEXPPC", "HEXPPC64", "HEXRV", "HEXRV64",
+		"HEXARC", "HEXARC64", "HEXV850", "HEXDALVIK",
+	}
+	addOnList := make([]AddOn, len(addons))
+	for i, code := range addons {
+		addOnList[i] = AddOn{
+			Code:      code,
+			ID:        fmt.Sprintf("48-1337-B00B-%02d", i+1),
+			Owner:     licID,
+			StartDate: startDate,
+			EndDate:   endDate,
+		}
+	}
 
 	payload := Payload{
 		Email: "lain@iwakura.page",
-		Name:  "lain iwakurwa",
+		Name:  "lain iwakura",
 		Licenses: []License{
 			{
-				ID:             "43-0000-FFFF-37",
+				ID:             licID,
 				Owner:          "lain iwakura",
+				Product:        "IDA",
 				ProductID:      "IDAPRO",
-				ProductVersion: "9.3",
+				ProductVersion: "9.4",
 				EditionID:      "ida-pro",
 				Description:    "IDA Pro",
 				StartDate:      startDate,
@@ -128,103 +118,63 @@ func main() {
 				IssuedOn:       issueDate,
 				LicenseType:    "named",
 				Seats:          67,
-				AddOns: []AddOn{
-					{Code: "HEXCX64", ID: "67-1337-B00B-01", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXCX86", ID: "67-1337-B00B-02", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXX64", ID: "67-1337-B00B-06", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXX86", ID: "67-1337-B00B-07", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXARM64", ID: "67-1337-B00B-03", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXARM", ID: "67-1337-B00B-08", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXMIPS", ID: "67-1337-B00B-09", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXMIPS64", ID: "67-1337-B00B-10", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXPPC", ID: "67-1337-B00B-16", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXPPC64", ID: "67-1337-B00B-17", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXAVR", ID: "67-1337-B00B-11", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXMAC", ID: "67-1337-B00B-12", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXRVD", ID: "67-1337-B00B-13", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXRISCV", ID: "67-1337-B00B-14", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXRISCV64", ID: "67-1337-B00B-15", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXARC", ID: "67-1337-B00B-18", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXARC64", ID: "67-1337-B00B-19", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXCARM", ID: "67-1337-B00B-20", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXCARM64", ID: "67-1337-B00B-21", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXCMIPS", ID: "67-1337-B00B-22", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXCMIPS64", ID: "67-1337-B00B-23", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXCPPC", ID: "67-1337-B00B-24", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXCPPC64", ID: "67-1337-B00B-25", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXCRV", ID: "67-1337-B00B-26", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXCRV64", ID: "67-1337-B00B-27", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "HEXCARC", ID: "67-1337-B00B-28", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "LUMINA", ID: "67-1337-B00B-04", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-					{Code: "TEAMS", ID: "67-1337-B00B-05", Owner: "43-0000-FFFF-37", StartDate: startDate, EndDate: endDate},
-				},
+				Features:       []interface{}{},
+				AddOns:         addOnList,
 			},
 		},
 	}
 
-	wrapperObj := map[string]interface{}{
-		"payload": payload,
-	}
-
+	// sort({payload}) - marshal struct -> unmarshal to generic map -> re-marshal (keys sorted)
+	wrapperObj := map[string]interface{}{"payload": payload}
 	tempBytes, _ := json.Marshal(wrapperObj)
-
-	// unmarshal into a generic map
 	var wrapper map[string]interface{}
-	err := json.Unmarshal(tempBytes, &wrapper)
-	if err != nil {
-		slog.Error("failed to unmarshal wrapper", "error", err)
+	if err := json.Unmarshal(tempBytes, &wrapper); err != nil {
+		slog.Error("unmarshal wrapper failed", "error", err)
 		os.Exit(1)
 	}
-
 	payloadBytes, err := json.Marshal(wrapper)
 	if err != nil {
-		slog.Error("failed to marshal sorted payload", "error", err)
+		slog.Error("marshal sorted payload failed", "error", err)
 		os.Exit(1)
 	}
 
 	hash := sha256.Sum256(payloadBytes)
 
-	// idas rsa signature padding for hexlic (be repres):
-	// total length must be exactly 127 bytes to bypass length checks
-	// byte 0..31: random padding (byte 0 MUST NOT be 0x00)
-	// byte 32..63: sha256 hash of the json payload
-	// byte 64..126: 0x00 padding
-
+	// signature block (127 bytes, big-endian for RSA):
+	// U = zero(127) with hash at [95:127]
+	// block = U XOR PADKEY
+	U := make([]byte, 127)
+	copy(U[95:], hash[:])
 	beBlock := make([]byte, 127)
-	rand.Read(beBlock[0:32])
-	for beBlock[0] == 0 {
-		rand.Read(beBlock[0:1])
+	for i := 0; i < 127; i++ {
+		beBlock[i] = U[i] ^ padKey[i]
+	}
+	if beBlock[0] == 0 {
+		beBlock[0] ^= 1
 	}
 
-	copy(beBlock[32:64], hash[:])
-
 	m := new(big.Int).SetBytes(beBlock)
-	s := new(big.Int).Exp(m, privKey.D, privKey.N)
+	s := new(big.Int).Exp(m, d, n)
 
 	sigBytes := s.Bytes()
 	if len(sigBytes) < 128 {
 		pad := make([]byte, 128-len(sigBytes))
 		sigBytes = append(pad, sigBytes...)
 	}
-
-	// ida parses the signature hex string as a le byte array
-	// we need to reverse our be signature before writing to json
 	sigBytesLe := make([]byte, 128)
 	for i := 0; i < 128; i++ {
 		sigBytesLe[i] = sigBytes[127-i]
 	}
 
-	// nd here we go
 	hexlic := Hexlic{
 		Header:    map[string]int{"version": 1},
 		Payload:   payload,
 		Signature: fmt.Sprintf("%X", sigBytesLe),
 	}
 
-	finalBytes, _ := json.MarshalIndent(hexlic, "", "  ")
-	err = os.WriteFile("ida.hexlic", finalBytes, 0644)
-	if err != nil {
-		slog.Error("whops, failed to write file", "error", err)
+	finalBytes, _ := json.Marshal(hexlic)
+	if err = os.WriteFile("ida.hexlic", finalBytes, 0644); err != nil {
+		slog.Error("failed to write ida.hexlic", "error", err)
 		os.Exit(1)
 	}
 

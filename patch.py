@@ -1,120 +1,88 @@
-import argparse
 import shutil
 import sys
 from pathlib import Path
 import logging
 
-# logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("ida_patcher")
 
-# original keys from ida pro 9.3
-ORIG_N_HEX = "edfd425cf978546e8911225884436c57140525650bcf6ebfe80edbc5fb1de68f4c66c29cb22eb668788afcb0abbb718044584b810f8970cddf227385f75d5dddd91d4f18937a08aa83b28c49d12dc92e7505bb38809e91bd0fbd2f2e6ab1d2e33c0c55d5bddd478ee8bf845fcef3c82b9d2929ecb71f4d1b3db96e3a8e7aaf93" # :scared:
-ORIG_E_HEX = "13000000"
+# JS keygen search/replace for unk_1C419A0 (license RSA pub key)
+SEARCH_HEX = (
+    "29f4481f796f9f66f2ff13cc4ab5b54f60845db603ba2c0bac8a9bc4b6cbdefc"
+    "5c62bfc2f5ee850ac45ea97ad347e8b56dba5085af8c8aad9cc2ec626ca78a06"
+    "8006d658f68651da31a0a77c65a70ed73a40d53b08edd403c095aa0bcffa52f3"
+    "13ebcacaaa2ce5024a4e2b9aa70fc6092f38ae094d71e43f7690b5ddd3e9e4f7"
+)
+REPLACE_HEX = (
+    "a107b71c8a08ba5350934f7cf6e81be3a24dc2e35f7200d80cbd70b37ed6811d"
+    "d2146d3cb7e20ad19b2544c0ef14c5c66ffbbdf226ec3f3d544c04385303ca4a"
+    "7179299340022f5d50948bcf8a60307e2c196329e51a5296dc419e40fef3ef7c"
+    "6f015a09ebd979e79615338985643e666c14897f9f597e11f44341f496d56861"
+)
 
-# exponent is always 0xA0 bytes after modulus n in libida
-EXPONENT_OFFSET_FROM_N = 0xA0
 
-def patch_library(file_path: Path, new_n_bytes: bytes, new_e_bytes: bytes) -> bool:
-    """
-    patches a single library file, replacing the rsa pub key
-    returns True if patched, False if already patched or failed.
-    """
+def patch_library(file_path: Path) -> bool:
     if not file_path.exists():
         logger.error(f"file not found: {file_path}")
         return False
-        
+
     with open(file_path, "rb") as f:
         data = bytearray(f.read())
-        
-    orig_n_bytes = bytes.fromhex(ORIG_N_HEX)
-    orig_e_bytes = bytes.fromhex(ORIG_E_HEX)
-    
-    # check if it has the original key
-    n_idx = data.find(orig_n_bytes)
-    
-    if n_idx == -1:
-        # check if already patched with our key
-        if data.find(new_n_bytes) != -1:
-            logger.info(f"{file_path.name} is already patched with the provided key!!!")
-            return True
-            
-        logger.error(f"couldt find the original rsa key in {file_path.name}. wrong version or already patched with a different key?..")
+
+    search = bytes.fromhex(SEARCH_HEX)
+    replace = bytes.fromhex(REPLACE_HEX)
+
+    if data.find(replace) != -1:
+        logger.info(f"{file_path.name}: already patched")
+        return True
+
+    count, pos = 0, 0
+    while True:
+        idx = data.find(search, pos)
+        if idx == -1:
+            break
+        data[idx:idx + 128] = replace
+        pos = idx + 128
+        count += 1
+
+    if count == 0:
+        logger.error(f"{file_path.name}: original key not found (wrong version or already patched differently?)")
         return False
-        
-    # verify the original e is where we expect it
-    e_idx = n_idx + EXPONENT_OFFSET_FROM_N
-    if data[e_idx:e_idx+4] != orig_e_bytes:
-        logger.warning(f"found n at offset {hex(n_idx)}, but e at {hex(e_idx)} does not match {ORIG_E_HEX}!")
-        logger.warning(f"found e bytes instead: {data[e_idx:e_idx+4].hex()}")
-        
-    # bak the original file just in case
-    backup_path = file_path.with_suffix(file_path.suffix + ".bak")
-    if not backup_path.exists():
-        logger.info(f"creating backup at {backup_path.name}")
-        shutil.copy2(file_path, backup_path)
-        
-    # pathc n
-    data[n_idx:n_idx+128] = new_n_bytes
-    
-    # patch e
-    data[e_idx:e_idx+4] = new_e_bytes
-    
-    # here we go
+
+    backup = file_path.with_suffix(file_path.suffix + ".bak")
+    if not backup.exists():
+        shutil.copy2(file_path, backup)
+        logger.info(f"backup: {backup.name}")
+
     with open(file_path, "wb") as f:
         f.write(data)
-        
-    logger.info(f"successfully patched {file_path.name} at n_offset={hex(n_idx)}, e_offset={hex(e_idx)}")
+
+    logger.info(f"patched {file_path.name}: replaced {count} occurrence(s)")
     return True
 
 
-def get_lib_names() -> list[str]:
+def lib_names() -> list[str]:
     if sys.platform == "darwin":
         return ["libida.dylib", "libida32.dylib"]
     elif sys.platform == "win32":
         return ["ida.dll", "ida32.dll"]
-    else:
-        return ["libida.so", "libida32.so"]
+    return ["libida.so", "libida32.so"]
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ida pro 9.3 rsa pub key patcher")
-    parser.add_argument("-n", "--new-n", required=True, help="new modulus n (hex string, le, 128 bytes/256 chars)")
-    parser.add_argument("-e", "--new-e", default="01000100", help="new exponent e (hex string, le, 4 bytes, default 65537/01000100)")
-    parser.add_argument("-d", "--ida-dir", required=True, type=Path, help="path to ida directory (e.g. on macos: ~/meowida/IDA\\ Professional\\ 9.3.app/Contents/MacOS)")
-
-    args = parser.parse_args()
-
-    new_n_hex = args.new_n.strip()
-    if len(new_n_hex) != 256:
-        logger.error(f"new N !!MUST BE!! exactly 256 hex char (128 bytes). goto {len(new_n_hex)}")
+    if len(sys.argv) != 3 or sys.argv[1] not in ("-d", "--ida-dir"):
+        print(f"usage: {sys.argv[0]} -d <ida-dir>")
         sys.exit(1)
 
-    new_e_hex = args.new_e.strip()
-    if len(new_e_hex) != 8:
-        logger.error(f"new E !!MUST BE!! exactly 8 hex char (4 bytes). got {len(new_e_hex)}")
-        sys.exit(1)
+    ida_dir = Path(sys.argv[2])
+    targets = [ida_dir / name for name in lib_names()]
 
-    try:
-        new_n_bytes = bytes.fromhex(new_n_hex)
-        new_e_bytes = bytes.fromhex(new_e_hex)
-    except ValueError as e:
-        logger.error(f"invalid hex string provided: {e}")
-        sys.exit(1)
-
-    ida_dir = args.ida_dir
-
-    targets = [ida_dir / name for name in get_lib_names()]
-    
-    success_count = 0
-    for target in targets:
-        if patch_library(target, new_n_bytes, new_e_bytes):
-            success_count += 1
-            
-    if success_count == len(targets):
-        logger.info("all targets patched successfully! :3 youre ready to go. (─‿‿─)")
+    ok = sum(patch_library(t) for t in targets)
+    if ok == len(targets):
+        logger.info("all targets patched! (─‿‿─)")
     else:
-        logger.warning(f"patched {success_count}/{len(targets)} targets")
+        logger.warning(f"patched {ok}/{len(targets)}")
+
 
 if __name__ == "__main__":
     main()
