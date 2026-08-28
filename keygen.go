@@ -80,7 +80,7 @@ func main() {
 
 	now := time.Now()
 	issueDate := now.Format("2006-01-02 15:04:05")
-	startDate := now.Format("2006-01-02") + " 00:00:00"
+	startDate := "2020-01-01 00:00:00"
 	endDate := now.AddDate(67, 0, 0).Format("2006-01-02") + " 00:00:00"
 
 	licID := "43-0000-FFFF-37"
